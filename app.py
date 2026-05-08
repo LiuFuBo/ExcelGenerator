@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QTextEdit, QMessageBox, QFileDialog
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment
@@ -34,20 +33,9 @@ class ExcelGeneratorApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Excel订单生成器")
-        self.setFixedSize(520, 830)
+        self.setFixedSize(520, 650)
         self.selected_file_path = ""
         self._build_ui()
-
-    def _resource_path(self, filename):
-        if getattr(sys, 'frozen', False):
-            if sys.platform == 'darwin' and 'Contents/MacOS' in sys.executable:
-                exe_dir = os.path.dirname(sys.executable)
-                contents_dir = os.path.dirname(exe_dir)
-                return os.path.join(contents_dir, 'Resources', filename)
-            else:
-                return os.path.join(os.path.dirname(sys.executable), filename)
-        else:
-            return os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
 
     def _build_ui(self):
         central = QWidget()
@@ -55,17 +43,6 @@ class ExcelGeneratorApp(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setContentsMargins(20, 15, 20, 15)
         layout.setSpacing(4)
-
-        # 封面图片
-        cover_label = QLabel()
-        img_path = self._resource_path('jj_header_rounded.png')
-        pixmap = QPixmap(img_path)
-        if not pixmap.isNull():
-            scaled = pixmap.scaled(480, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            cover_label.setPixmap(scaled)
-            cover_label.setAlignment(Qt.AlignCenter)
-            layout.addWidget(cover_label)
-            layout.addSpacing(8)
 
         # Excel名称
         layout.addWidget(QLabel("Excel名称:"))
@@ -137,7 +114,15 @@ class ExcelGeneratorApp(QMainWindow):
         layout.addSpacing(12)
 
         # 报错日志
-        layout.addWidget(QLabel("报错日志:"))
+        log_header = QHBoxLayout()
+        log_header.addWidget(QLabel("报错日志:"))
+        log_header.addStretch()
+        self.copy_log_btn = QPushButton("复制日志")
+        self.copy_log_btn.setFixedWidth(80)
+        self.copy_log_btn.setStyleSheet("QPushButton { background-color: #e0e0e0; color: #666; border-radius: 3px; } QPushButton:hover { background-color: #d0d0d0; }")
+        self.copy_log_btn.clicked.connect(self._on_copy_log)
+        log_header.addWidget(self.copy_log_btn)
+        layout.addLayout(log_header)
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
         self.log_area.setStyleSheet("background-color: #f5f5f5; font-size: 12px;")
@@ -165,6 +150,13 @@ class ExcelGeneratorApp(QMainWindow):
 
     def _on_excel_name_changed(self, text):
         pass
+
+    def _on_copy_log(self):
+        text = self.log_area.toPlainText()
+        if text:
+            clipboard = QApplication.clipboard()
+            clipboard.setText(text)
+            QMessageBox.information(self, "提示", "复制日志成功")
 
     def log_message(self, message, is_error=False):
         prefix = "[错误] " if is_error else "[信息] "
@@ -226,45 +218,37 @@ class ExcelGeneratorApp(QMainWindow):
                 return row
         return 0
 
-    def _sort_rows_by_date(self, ws, date_col, order_col=None):
+    def count_data_cells(self, ws, col):
+        """计算某列实际非空数据条数（排除第1行标题）"""
+        count = 0
+        for row in range(2, ws.max_row + 1):
+            val = ws.cell(row=row, column=col).value
+            if val is not None and val != "":
+                count += 1
+        return count
+
+    def _sort_date_column(self, ws, date_col):
+        """仅排序销售日期列的数据，其他列保持不动"""
         last_row = ws.max_row
         if last_row <= 1:
             return
-        max_col = ws.max_column
 
-        # 收集所有数据行的值和对齐方式
-        rows_data = []
+        dates = []
         for row in range(2, last_row + 1):
-            row_data = []
-            for col in range(1, max_col + 1):
-                cell = ws.cell(row=row, column=col)
-                orig_align = cell.alignment
-                # StyleProxy不可哈希，需转为Alignment对象
-                saved_align = Alignment(
-                    horizontal=orig_align.horizontal,
-                    vertical=orig_align.vertical,
-                    wrap_text=orig_align.wrap_text
-                ) if orig_align else None
-                row_data.append((cell.value, saved_align))
-            rows_data.append(row_data)
+            dates.append(ws.cell(row=row, column=date_col).value)
 
-        # 按销售日期降序排序，无日期的行排在末尾
-        date_idx = date_col - 1
-        rows_data.sort(
-            key=lambda r: (1, r[date_idx][0] or '') if r[date_idx][0] else (0, ''),
+        dates.sort(
+            key=lambda d: (1, d or '') if d else (0, ''),
             reverse=True
         )
 
-        # 写回排序后的数据
-        for i, row_data in enumerate(rows_data):
-            for col_idx, (value, saved_align) in enumerate(row_data):
-                col = col_idx + 1
-                cell = ws.cell(row=i + 2, column=col)
-                cell.value = value
-                if col == date_col or col == order_col:
-                    cell.alignment = Alignment(horizontal='center', vertical='center')
-                elif saved_align:
-                    cell.alignment = saved_align
+        for i, date_val in enumerate(dates):
+            row = i + 2
+            if date_val is not None:
+                cell = ws.cell(row=row, column=date_col, value=date_val)
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+            else:
+                ws.cell(row=row, column=date_col).value = None
 
     def start_generation(self):
         # === 校验Excel名称 ===
@@ -373,64 +357,92 @@ class ExcelGeneratorApp(QMainWindow):
                     date_start_row = 2
                     self.log_message(f"在列{date_col}新建销售日期标题")
 
-                # 生成日期并按时间降序排序（从近到远）
                 dates = [self.generate_random_datetime(month) for _ in range(date_count)]
-                dates.sort(key=lambda x: datetime.strptime(x, "%Y-%m-%d %H:%M:%S"), reverse=True)
-
                 for i, dt in enumerate(dates):
                     cell = ws.cell(row=date_start_row + i, column=date_col, value=dt)
                     cell.alignment = Alignment(horizontal='center', vertical='center')
+                self.log_message(f"写入{date_count}条销售日期")
 
-                self.log_message(
-                    f"写入{date_count}条销售日期(行{date_start_row}-{date_start_row + date_count - 1})")
+            # 如果只生成单号（没有新日期），必须找到已有日期列
+            if date_count <= 0 and order_count > 0:
+                date_col = self.find_column_by_header(ws, "销售日期")
+                if date_col is None:
+                    QMessageBox.warning(self, "提示", "无法生成销售单号：文件中没有销售日期数据")
+                    self.log_message("没有销售日期列，无法生成单号", is_error=True)
+                    return
+                self.log_message(f"使用已有销售日期列(列{date_col})")
 
-            # 调整列宽
+            # === 排序前先统计已有单号条数（排序会移动位置，需提前计数）===
+            existing_order_col = self.find_column_by_header(ws, "销售单号")
+            existing_order_length = 0
+            if existing_order_col is not None:
+                existing_order_length = self.count_data_cells(ws, existing_order_col)
+
+            # === 仅排序销售日期列（不排单号列）===
             if date_col is not None:
-                ws.column_dimensions[get_column_letter(date_col)].width = 22
-            if order_col is not None:
-                ws.column_dimensions[get_column_letter(order_col)].width = 25
+                self._sort_date_column(ws, date_col)
+                self.log_message("已按销售日期降序排序（仅日期列）")
 
-            # 按销售日期重新排序所有数据（在生成销售单号之前排序，确保单号与同行日期对应）
+            # === 计算总日期长度 ===
+            total_date_length = 0
             if date_col is not None:
-                self._sort_rows_by_date(ws, date_col, order_col)
-                self.log_message("已按销售日期降序重新排序所有数据")
+                total_date_length = self.count_data_cells(ws, date_col)
+                self.log_message(f"销售日期总长度: {total_date_length}条")
 
-            # === 处理销售单号列（在排序后生成，确保单号年月日与同行日期对应）===
+            # === 处理销售单号列 ===
             order_col = None
+            actual_order_count = 0
+
             if order_count > 0:
-                order_col = self.find_column_by_header(ws, "销售单号")
-                if order_col is not None:
-                    last_row = self.get_last_data_row(ws, order_col)
-                    order_start_row = last_row + 1
-                    self.log_message(f"销售单号列已存在(列{order_col})，追加{order_count}条数据")
-                else:
-                    if date_col is not None:
-                        order_col = date_col + 1
+                if existing_order_col is not None:
+                    # 情况2：已有销售单号列，a = 旧单号长度 + 用户输入数
+                    order_col = existing_order_col
+                    # 清空旧单号（排序后旧单号与日期不再对应，全部清空再重新生成）
+                    for row in range(2, ws.max_row + 1):
+                        ws.cell(row=row, column=order_col).value = None
+
+                    a = existing_order_length + order_count
+                    if a >= total_date_length:
+                        actual_order_count = total_date_length
                     else:
-                        order_col = self.find_first_empty_column(ws)
+                        actual_order_count = a
+
+                    self.log_message(
+                        f"已有单号{existing_order_length}条+新增{order_count}={a}，"
+                        f"实际重新生成{actual_order_count}条单号"
+                    )
+                else:
+                    # 情况1：没有销售单号列，新建列
+                    order_col = date_col + 1 if date_col else self.find_first_empty_column(ws)
                     next_val = ws.cell(row=1, column=order_col).value
                     if next_val is not None and next_val != "":
                         ws.insert_cols(order_col)
                         self.log_message(f"在列{order_col}插入新列(原有数据右移)")
                     ws.cell(row=1, column=order_col, value="销售单号")
-                    order_start_row = 2
-                    self.log_message(f"在列{order_col}新建销售单号标题")
 
-                for i in range(order_count):
-                    row = order_start_row + i
-                    if date_col is not None:
-                        date_value = ws.cell(row=row, column=date_col).value
-                        if date_value:
-                            order_num = self.generate_order_number_from_date(date_value)
-                        else:
-                            order_num = self.generate_order_number(month)
+                    actual_order_count = min(order_count, total_date_length)
+                    self.log_message(
+                        f"新建单号列(列{order_col})，生成{actual_order_count}条"
+                        f"(请求{order_count}条，日期长度{total_date_length}条)"
+                    )
+
+                # 从上到下重新生成销售订单编号（根据同行销售日期覆盖）
+                for i in range(actual_order_count):
+                    row = 2 + i
+                    date_value = ws.cell(row=row, column=date_col).value if date_col else None
+                    if date_value:
+                        order_num = self.generate_order_number_from_date(date_value)
                     else:
                         order_num = self.generate_order_number(month)
                     cell = ws.cell(row=row, column=order_col, value=order_num)
                     cell.alignment = Alignment(horizontal='center', vertical='center')
 
-                self.log_message(
-                    f"写入{order_count}条销售单号(行{order_start_row}-{order_start_row + order_count - 1})")
+                self.log_message(f"已从上到下重新生成{actual_order_count}条销售单号，单号日期与同行日期一致")
+
+            # 调整列宽
+            if date_col is not None:
+                ws.column_dimensions[get_column_letter(date_col)].width = 22
+            if order_col is not None:
                 ws.column_dimensions[get_column_letter(order_col)].width = 25
 
             wb.save(file_path)
