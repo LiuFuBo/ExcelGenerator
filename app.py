@@ -375,7 +375,18 @@ class ExcelGeneratorApp(QMainWindow):
                 self.log_message(
                     f"写入{date_count}条销售日期(行{date_start_row}-{date_start_row + date_count - 1})")
 
-            # === 处理销售单号列 ===
+            # 调整列宽
+            if date_col is not None:
+                ws.column_dimensions[get_column_letter(date_col)].width = 22
+            if order_col is not None:
+                ws.column_dimensions[get_column_letter(order_col)].width = 25
+
+            # 按销售日期重新排序所有数据（在生成销售单号之前排序，确保单号与同行日期对应）
+            if date_col is not None:
+                self._sort_rows_by_date(ws, date_col, order_col)
+                self.log_message("已按销售日期降序重新排序所有数据")
+
+            # === 处理销售单号列（在排序后生成，确保单号年月日与同行日期对应）===
             order_col = None
             if order_count > 0:
                 order_col = self.find_column_by_header(ws, "销售单号")
@@ -384,7 +395,6 @@ class ExcelGeneratorApp(QMainWindow):
                     order_start_row = last_row + 1
                     self.log_message(f"销售单号列已存在(列{order_col})，追加{order_count}条数据")
                 else:
-                    # 销售单号列不存在，找合适位置插入
                     if date_col is not None:
                         order_col = date_col + 1
                     else:
@@ -412,17 +422,7 @@ class ExcelGeneratorApp(QMainWindow):
 
                 self.log_message(
                     f"写入{order_count}条销售单号(行{order_start_row}-{order_start_row + order_count - 1})")
-
-            # 调整列宽
-            if date_col is not None:
-                ws.column_dimensions[get_column_letter(date_col)].width = 22
-            if order_col is not None:
                 ws.column_dimensions[get_column_letter(order_col)].width = 25
-
-            # 选择已有文件时，按销售日期重新排序所有数据
-            if self.selected_file_path and date_col is not None:
-                self._sort_rows_by_date(ws, date_col, order_col)
-                self.log_message("已按销售日期降序重新排序所有数据")
 
             wb.save(file_path)
             self.log_message(f"文件保存成功: {file_path}")
