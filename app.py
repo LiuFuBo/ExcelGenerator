@@ -198,6 +198,12 @@ class ExcelGeneratorApp(QMainWindow):
         random_part = "1" + "".join([str(random.randint(0, 9)) for _ in range(13)])
         return f"S{yymmdd}{random_part}"
 
+    def generate_order_number_from_date(self, date_str):
+        dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+        yymmdd = dt.strftime("%y%m%d")
+        random_part = "1" + "".join([str(random.randint(0, 9)) for _ in range(13)])
+        return f"S{yymmdd}{random_part}"
+
     def find_column_by_header(self, ws, header_name):
         for col in range(1, ws.max_column + 2):
             if ws.cell(row=1, column=col).value == header_name:
@@ -392,8 +398,16 @@ class ExcelGeneratorApp(QMainWindow):
                     self.log_message(f"在列{order_col}新建销售单号标题")
 
                 for i in range(order_count):
-                    order_num = self.generate_order_number(month)
-                    cell = ws.cell(row=order_start_row + i, column=order_col, value=order_num)
+                    row = order_start_row + i
+                    if date_col is not None:
+                        date_value = ws.cell(row=row, column=date_col).value
+                        if date_value:
+                            order_num = self.generate_order_number_from_date(date_value)
+                        else:
+                            order_num = self.generate_order_number(month)
+                    else:
+                        order_num = self.generate_order_number(month)
+                    cell = ws.cell(row=row, column=order_col, value=order_num)
                     cell.alignment = Alignment(horizontal='center', vertical='center')
 
                 self.log_message(
