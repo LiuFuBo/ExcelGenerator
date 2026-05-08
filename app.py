@@ -15,6 +15,7 @@ import sys
 import os
 import random
 import calendar
+import traceback
 from datetime import datetime, timedelta
 
 from PySide6.QtWidgets import (
@@ -40,8 +41,9 @@ class ExcelGeneratorApp(QMainWindow):
     def _resource_path(self, filename):
         if getattr(sys, 'frozen', False):
             if sys.platform == 'darwin' and 'Contents/MacOS' in sys.executable:
-                base = os.path.dirname(os.path.dirname(os.path.dirname(sys.executable)))
-                return os.path.join(base, 'Resources', filename)
+                exe_dir = os.path.dirname(sys.executable)
+                contents_dir = os.path.dirname(exe_dir)
+                return os.path.join(contents_dir, 'Resources', filename)
             else:
                 return os.path.join(os.path.dirname(sys.executable), filename)
         else:
