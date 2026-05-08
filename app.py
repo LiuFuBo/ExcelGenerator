@@ -327,6 +327,10 @@ class ExcelGeneratorApp(QMainWindow):
                     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(exe_dir)))
                 else:
                     base_dir = exe_dir
+                # 如果目录不可写（如从dmg挂载卷运行），回退到桌面
+                if not os.access(base_dir, os.W_OK):
+                    base_dir = os.path.expanduser("~/Desktop")
+                    self.log_message(f"当前目录不可写，文件将保存到桌面: {base_dir}")
             else:
                 base_dir = os.path.dirname(os.path.abspath(__file__))
             file_path = os.path.join(base_dir, excel_name)
