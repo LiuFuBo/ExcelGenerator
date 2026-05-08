@@ -236,7 +236,14 @@ class ExcelGeneratorApp(QMainWindow):
             row_data = []
             for col in range(1, max_col + 1):
                 cell = ws.cell(row=row, column=col)
-                row_data.append((cell.value, cell.alignment))
+                orig_align = cell.alignment
+                # StyleProxy不可哈希，需转为Alignment对象
+                saved_align = Alignment(
+                    horizontal=orig_align.horizontal,
+                    vertical=orig_align.vertical,
+                    wrap_text=orig_align.wrap_text
+                ) if orig_align else None
+                row_data.append((cell.value, saved_align))
             rows_data.append(row_data)
 
         # 按销售日期降序排序，无日期的行排在末尾
@@ -248,14 +255,14 @@ class ExcelGeneratorApp(QMainWindow):
 
         # 写回排序后的数据
         for i, row_data in enumerate(rows_data):
-            for col_idx, (value, orig_alignment) in enumerate(row_data):
+            for col_idx, (value, saved_align) in enumerate(row_data):
                 col = col_idx + 1
                 cell = ws.cell(row=i + 2, column=col)
                 cell.value = value
                 if col == date_col or col == order_col:
                     cell.alignment = Alignment(horizontal='center', vertical='center')
-                else:
-                    cell.alignment = orig_alignment
+                elif saved_align:
+                    cell.alignment = saved_align
 
     def start_generation(self):
         # === 校验Excel名称 ===
