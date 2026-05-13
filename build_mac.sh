@@ -30,17 +30,51 @@ if [ ! -d "dist/ExcelGenerator.app" ]; then
     exit 1
 fi
 
-echo "4. .app构建成功，创建.dmg..."
+echo "4. 创建安装说明文件..."
+cat > dist/安装说明.txt << 'INSTRUCTIONS'
+========================================
+  ExcelGenerator 安装说明 (Mac版)
+========================================
+
+首次打开时，macOS 可能提示"无法验证开发者"，
+这是因为应用未经过 Apple 公证。请按以下步骤操作：
+
+方法一（推荐）：
+  1. 将 ExcelGenerator.app 拖到"应用程序"文件夹
+  2. 右键点击 ExcelGenerator.app → 选择"打开"
+  3. 弹出确认窗口后，点击"打开"即可
+
+方法二：
+  1. 将 ExcelGenerator.app 拖到"应用程序"文件夹
+  2. 打开"终端"（在启动台搜索"终端"）
+  3. 输入以下命令并回车：
+     xattr -cr /Applications/ExcelGenerator.app
+  4. 之后即可正常双击打开
+
+========================================
+INSTRUCTIONS
+
+echo "5. .app构建成功，创建.dmg..."
+# 创建临时目录用于dmg内容，包含.app和安装说明
+dmg_temp="dist/dmg_temp"
+rm -rf "$dmg_temp"
+mkdir -p "$dmg_temp"
+cp -R dist/ExcelGenerator.app "$dmg_temp/"
+cp dist/安装说明.txt "$dmg_temp/"
+
 hdiutil create -volname "ExcelGenerator" \
-    -srcfolder dist/ExcelGenerator.app \
+    -srcfolder "$dmg_temp" \
     -ov -format UDZO \
     ExcelGenerator.dmg
+
+rm -rf "$dmg_temp"
 
 if [ -f "ExcelGenerator.dmg" ]; then
     echo "=== 构建完成 ==="
     echo ".dmg文件: ExcelGenerator.dmg (约50MB)"
     echo ".app文件: dist/ExcelGenerator.app"
-    echo "双击.dmg安装，或将.app拖到应用程序文件夹"
+    echo "DMG内包含: ExcelGenerator.app + 安装说明.txt"
+    echo "双击.dmg安装，将.app拖到应用程序文件夹"
 else
     echo ".dmg创建失败"
     exit 1

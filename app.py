@@ -33,7 +33,7 @@ class ExcelGeneratorApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Excel订单生成器")
-        self.setFixedSize(520, 650)
+        self.setFixedSize(520, 700)
         self.selected_file_path = ""
         self._build_ui()
 
@@ -96,6 +96,12 @@ class ExcelGeneratorApp(QMainWindow):
         layout.addWidget(QLabel("销售单号总条数:"))
         self.order_count_input = QLineEdit()
         layout.addWidget(self.order_count_input)
+        layout.addSpacing(8)
+
+        # Pos单号总条数
+        layout.addWidget(QLabel("Pos单号总条数:"))
+        self.pos_count_input = QLineEdit()
+        layout.addWidget(self.pos_count_input)
         layout.addSpacing(12)
 
         # 开始生成按钮
@@ -113,9 +119,9 @@ class ExcelGeneratorApp(QMainWindow):
         layout.addWidget(self.start_btn)
         layout.addSpacing(12)
 
-        # 报错日志
+        # 操作日志
         log_header = QHBoxLayout()
-        log_header.addWidget(QLabel("报错日志:"))
+        log_header.addWidget(QLabel("操作日志:"))
         log_header.addStretch()
         self.copy_log_btn = QPushButton("复制日志")
         self.copy_log_btn.setFixedWidth(80)
@@ -197,6 +203,12 @@ class ExcelGeneratorApp(QMainWindow):
         yymmdd = dt.strftime("%y%m%d")
         random_part = "1" + "".join([str(random.randint(0, 9)) for _ in range(13)])
         return f"S{yymmdd}{random_part}"
+
+    def generate_pos_number_from_date(self, date_str):
+        dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+        yyyymmdd = dt.strftime("%Y%m%d")
+        random_part = "".join([str(random.randint(0, 9)) for _ in range(5)])
+        return f"OS{yyyymmdd}-{random_part}"
 
     def find_column_by_header(self, ws, header_name):
         for col in range(1, ws.max_column + 2):
@@ -307,10 +319,26 @@ class ExcelGeneratorApp(QMainWindow):
         else:
             order_count = 0
 
+        # === 校验Pos单号总条数 ===
+        pos_count_str = self.pos_count_input.text().strip()
+        if pos_count_str:
+            try:
+                pos_count = int(pos_count_str)
+                if pos_count <= 0:
+                    QMessageBox.warning(self, "提示", "Pos单号总条数必须大于0")
+                    self.log_message("Pos单号总条数必须大于0", is_error=True)
+                    return
+            except ValueError:
+                QMessageBox.warning(self, "提示", "Pos单号总条数必须为整数")
+                self.log_message("Pos单号总条数格式错误", is_error=True)
+                return
+        else:
+            pos_count = 0
+
         # 至少一个总条数大于0
-        if date_count <= 0 and order_count <= 0:
-            QMessageBox.warning(self, "提示", "销售日期和销售单号总条数至少需要一个大于0")
-            self.log_message("两个总条数均为0", is_error=True)
+        if date_count <= 0 and order_count <= 0 and pos_count <= 0:
+            QMessageBox.warning(self, "提示", "销售日期、销售单号和Pos单号总条数至少需要一个大于0")
+            self.log_message("三个总条数均为0", is_error=True)
             return
 
         # 确定文件路径
@@ -320,19 +348,8 @@ class ExcelGeneratorApp(QMainWindow):
             # 确保文件名以.xlsx结尾
             if not excel_name.endswith(".xlsx"):
                 excel_name += ".xlsx"
-            # 定保存路径：放到软件exe/.app所在目录
-            if getattr(sys, 'frozen', False):
-                exe_dir = os.path.dirname(sys.executable)
-                if sys.platform == 'darwin' and 'Contents/MacOS' in exe_dir:
-                    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(exe_dir)))
-                else:
-                    base_dir = exe_dir
-                # 如果目录不可写（如从dmg挂载卷运行），回退到桌面
-                if not os.access(base_dir, os.W_OK):
-                    base_dir = os.path.expanduser("~/Desktop")
-                    self.log_message(f"当前目录不可写，文件将保存到桌面: {base_dir}")
-            else:
-                base_dir = os.path.dirname(os.path.abspath(__file__))
+            # 新文件保存到桌面
+            base_dir = os.path.expanduser("~/Desktop")
             file_path = os.path.join(base_dir, excel_name)
 
         try:
@@ -443,11 +460,70 @@ class ExcelGeneratorApp(QMainWindow):
 
                 self.log_message(f"已从上到下重新生成{actual_order_count}条销售单号，单号日期与同行日期一致")
 
+            # === 处理Pos单号列 ===
+            pos_col = None
+            actual_pos_count = 0
+
+            if pos_count > 0:
+                existing_pos_col = self.find_column_by_header(ws, "Pos单号")
+                existing_pos_length = 0
+                if existing_pos_col is not None:
+                    existing_pos_length = self.count_data_cells(ws, existing_pos_col)
+
+                if existing_pos_col is not None:
+                    # 情况2：已有Pos单号列，a = 旧长度 + 用户输入数
+                    pos_col = existing_pos_col
+                    # 清空旧Pos单号，全部重新生成
+                    for row in range(2, ws.max_row + 1):
+                        ws.cell(row=row, column=pos_col).value = None
+
+                    a = existing_pos_length + pos_count
+                    if a >= total_date_length:
+                        actual_pos_count = total_date_length
+                    else:
+                        actual_pos_count = a
+
+                    self.log_message(
+                        f"已有Pos单号{existing_pos_length}条+新增{pos_count}={a}，"
+                        f"实际重新生成{actual_pos_count}条Pos单号"
+                    )
+                else:
+                    # 情况1：没有Pos单号列，新建列
+                    pos_col = (order_col or date_col) + 1 if (order_col or date_col) else self.find_first_empty_column(ws)
+                    next_val = ws.cell(row=1, column=pos_col).value
+                    if next_val is not None and next_val != "":
+                        ws.insert_cols(pos_col)
+                        self.log_message(f"在列{pos_col}插入新列(原有数据右移)")
+                    ws.cell(row=1, column=pos_col, value="Pos单号")
+
+                    actual_pos_count = min(pos_count, total_date_length)
+                    self.log_message(
+                        f"新建Pos单号列(列{pos_col})，生成{actual_pos_count}条"
+                        f"(请求{pos_count}条，日期长度{total_date_length}条)"
+                    )
+
+                # 从上到下根据同行销售日期生成Pos单号
+                for i in range(actual_pos_count):
+                    row = 2 + i
+                    date_value = ws.cell(row=row, column=date_col).value if date_col else None
+                    if date_value:
+                        pos_num = self.generate_pos_number_from_date(date_value)
+                    else:
+                        pos_num = self.generate_pos_number_from_date(
+                            self.generate_random_datetime(month)
+                        )
+                    cell = ws.cell(row=row, column=pos_col, value=pos_num)
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+
+                self.log_message(f"已从上到下重新生成{actual_pos_count}条Pos单号，Pos单号日期与同行日期一致")
+
             # 调整列宽
             if date_col is not None:
                 ws.column_dimensions[get_column_letter(date_col)].width = 22
             if order_col is not None:
                 ws.column_dimensions[get_column_letter(order_col)].width = 25
+            if pos_col is not None:
+                ws.column_dimensions[get_column_letter(pos_col)].width = 22
 
             wb.save(file_path)
             self.log_message(f"文件保存成功: {file_path}")
