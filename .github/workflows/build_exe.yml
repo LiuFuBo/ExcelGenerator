@@ -25,7 +25,7 @@ jobs:
 
       - name: Build EXE
         shell: cmd
-        run: pyinstaller --onefile --windowed --name "ExcelGenerator" --icon=header.ico --hidden-import=pypinyin --hidden-import=openpyxl --hidden-import=openpyxl.cell._writer --add-data="jj_header_rounded.png;." --collect-data=pypinyin --noconfirm app.py
+        run: pyinstaller --onefile --windowed --name "ExcelGenerator" --icon=header.ico --hidden-import=pypinyin --hidden-import=openpyxl --hidden-import=openpyxl.cell._writer --add-data="jj_header_rounded.png;." --add-data="city_address.json;." --add-data="icon_map.png;." --collect-data=pypinyin --noconfirm app.py
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4.6.0

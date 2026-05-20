@@ -21,6 +21,8 @@ python3.11 -m PyInstaller --windowed \
     --hidden-import=openpyxl \
     --hidden-import=openpyxl.cell._writer \
     --add-data="jj_header_rounded.png:." \
+    --add-data="city_address.json:." \
+    --add-data="icon_map.png:." \
     --collect-data=pypinyin \
     --noconfirm \
     app.py
