@@ -5,17 +5,14 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v6
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5.6.0
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -28,7 +25,7 @@ jobs:
         run: pyinstaller --onefile --windowed --name "ExcelGenerator" --icon=header.ico --hidden-import=pypinyin --hidden-import=openpyxl --hidden-import=openpyxl.cell._writer --hidden-import=PIL --hidden-import=PIL.Image --hidden-import=PIL.ImageOps --hidden-import=PIL.ImageDraw --hidden-import=PIL.ImageFont --hidden-import=PIL.ImageFilter --add-data="jj_header_rounded.png;." --add-data="city_address.json;." --add-data="icon_map.png;." --collect-data=pypinyin --noconfirm app.py
 
       - name: Upload EXE artifact
-        uses: actions/upload-artifact@v4.6.0
+        uses: actions/upload-artifact@v7
         with:
           name: ExcelGenerator-Windows
           path: dist\ExcelGenerator.exe
