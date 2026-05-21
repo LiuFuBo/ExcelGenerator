@@ -17,6 +17,7 @@ import json
 import random
 import calendar
 import traceback
+import threading
 from datetime import datetime, timedelta
 
 from PySide6.QtWidgets import (
@@ -26,8 +27,8 @@ from PySide6.QtWidgets import (
     QCheckBox, QGridLayout, QDialog, QGraphicsOpacityEffect,
     QRadioButton, QButtonGroup
 )
-from PySide6.QtCore import Qt, QSize, QRect, QTimer, QStandardPaths, QPropertyAnimation
-from PySide6.QtGui import QFont, QColor, QIcon, QPixmap, QImage, QPainter, QPen, QConicalGradient
+from PySide6.QtCore import Qt, QSize, QRect, QTimer, QStandardPaths, QPropertyAnimation, Signal, QObject
+from PySide6.QtGui import QFont, QColor, QIcon, QPixmap, QImage, QPainter, QPen, QConicalGradient, QPainterPath
 
 from PIL import Image, ImageOps, ImageFont, ImageDraw, ImageFilter
 from openpyxl import Workbook, load_workbook
@@ -290,27 +291,29 @@ QWidget {
 #wm_img_btn {
     background: transparent;
     border: none;
+    border-radius: 8px 8px 0 0;
     padding: 0px;
     margin: 0px;
 }
 #wm_img_btn:hover { background: transparent; }
 #wm_filename_label {
-    font-size: 10px;
+    font-size: 12px;
     color: #6e6e73;
 }
 #wm_delete_btn {
-    background: rgba(239,68,68,.15);
-    color: #EF4444;
+    background: #EF4444;
+    color: #FFFFFF;
     border: none;
-    border-radius: 4px;
+    border-radius: 8px;
     font-size: 9px;
-    min-width: 18px;
-    max-width: 18px;
-    min-height: 18px;
-    max-height: 18px;
+    min-width: 16px;
+    max-width: 16px;
+    min-height: 16px;
+    max-height: 16px;
     padding: 0px;
+    font-weight: bold;
 }
-#wm_delete_btn:hover { background: rgba(239,68,68,.3); }
+#wm_delete_btn:hover { background: #DC2626; }
 #wm_skeleton {
     background: #F8FAFC;
     border: 2px solid #E2E8F0;
@@ -458,6 +461,24 @@ QWidget {
     font-size: 12px;
     color: #94A3B8;
 }
+#loaded_label_loading {
+    font-size: 12px;
+    font-weight: 600;
+    color: #F59E0B;
+    background: #FEF3C7;
+    border: 1px solid #FDE68A;
+    border-radius: 4px;
+    padding: 2px 8px;
+}
+#loaded_label_done {
+    font-size: 12px;
+    font-weight: 600;
+    color: #3B82F6;
+    background: #EFF6FF;
+    border: 1px solid #BFDBFE;
+    border-radius: 4px;
+    padding: 2px 8px;
+}
 #wm_picker_item {
     background: #F8FAFC;
     border: 2px solid #E2E8F0;
@@ -598,22 +619,29 @@ QWidget {
 #cp_img_btn {
     background: transparent;
     border: none;
+    border-radius: 8px 8px 0 0;
     padding: 0px;
     margin: 0px;
 }
 #cp_img_btn:hover { background: transparent; }
 #cp_filename_label {
-    font-size: 10px;
+    font-size: 12px;
     color: #6e6e73;
 }
 #cp_delete_btn {
-    background: rgba(239,68,68,.15);
-    color: #EF4444;
+    background: #EF4444;
+    color: #FFFFFF;
     border: none;
-    border-radius: 4px;
+    border-radius: 8px;
     font-size: 9px;
+    min-width: 16px;
+    max-width: 16px;
+    min-height: 16px;
+    max-height: 16px;
+    padding: 0px;
+    font-weight: bold;
 }
-#cp_delete_btn:hover { background: rgba(239,68,68,.25); }
+#cp_delete_btn:hover { background: #DC2626; }
 #cp_skeleton {
     background: #F8FAFC;
     border: 2px solid #E2E8F0;
@@ -734,6 +762,9 @@ class ImagePickerDialog(QDialog):
         self.image_files = []
         self.checkboxes = []
         self._parent = parent
+        self._load_worker = None
+        self._skeleton_cards = {}
+        self._picker_thumb_width = 120
         self._build_ui()
 
     def _build_ui(self):
@@ -766,6 +797,7 @@ class ImagePickerDialog(QDialog):
         toolbar = QWidget()
         tb_layout = QHBoxLayout(toolbar)
         tb_layout.setContentsMargins(0, 0, 0, 0)
+        tb_layout.setSpacing(8)
 
         selectall_btn = QPushButton("全选")
         selectall_btn.setObjectName("wm_picker_selectall_btn")
@@ -778,6 +810,10 @@ class ImagePickerDialog(QDialog):
         deselect_btn.setCursor(Qt.PointingHandCursor)
         deselect_btn.clicked.connect(self._on_deselect_all)
         tb_layout.addWidget(deselect_btn)
+
+        self.loaded_label = QLabel("已加载 0/0 张")
+        self.loaded_label.setObjectName("loaded_label_loading")
+        tb_layout.addWidget(self.loaded_label)
 
         tb_layout.addStretch()
 
@@ -846,7 +882,10 @@ class ImagePickerDialog(QDialog):
                 full_path = os.path.join(self.folder_path, fname)
                 self.image_files.append(full_path)
         self._clear_grid()
-        self._load_index = 0
+        # Stop previous worker if running
+        if self._load_worker:
+            self._load_worker.image_ready.disconnect(self._on_image_ready)
+            self._load_worker = None
 
         if not self.image_files:
             self.empty_hint = QLabel("文件夹中没有图片文件")
@@ -872,68 +911,35 @@ class ImagePickerDialog(QDialog):
             self._skeleton_cards[i] = skeleton
             self.grid_layout.addWidget(skeleton, row, col)
 
-        # Start replacing skeletons with real images after brief render delay
-        QTimer.singleShot(50, self._load_next_image)
+        # Start background thread to load images
+        self._load_worker = ImageLoadWorker()
+        self._load_worker.image_ready.connect(self._on_image_ready)
+        self._load_worker.start(self.image_files, tw)
 
-    def _clear_grid(self):
-        while self.grid_layout.count():
-            item = self.grid_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self.checkboxes.clear()
-
-    def _create_skeleton_card(self, tw):
-        card = QFrame()
-        card.setObjectName("wm_picker_skeleton")
-        card.setMinimumHeight(180)
-        card.setMaximumWidth(tw + 8)
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(4, 15, 4, 15)
-        card_layout.setSpacing(4)
-
-        # Fake checkbox row
-        top_row = QWidget()
-        top_layout = QHBoxLayout(top_row)
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        fake_cb = QLabel()
-        fake_cb.setObjectName("wm_skeleton_checkbox")
-        fake_cb.setFixedSize(18, 18)
-        top_layout.addWidget(fake_cb)
-        fake_text = QLabel()
-        fake_text.setObjectName("wm_skeleton_text")
-        fake_text.setMinimumWidth(60)
-        top_layout.addWidget(fake_text)
-        top_layout.addStretch()
-        card_layout.addWidget(top_row)
-
-        # Fake thumbnail area
-        shimmer = QLabel()
-        shimmer.setObjectName("wm_skeleton_shimmer")
-        shimmer.setFixedSize(tw, 200)
-        card_layout.addWidget(shimmer)
-
-        return card
-
-    def _load_next_image(self):
-        if self._load_index >= len(self.image_files):
-            return
-
-        path = self.image_files[self._load_index]
-        index = self._load_index
+    def _on_image_ready(self, index, path):
         row = index // 4
         col = index % 4
         tw = self._picker_thumb_width
 
-        # Remove skeleton card at this position
+        # Remove skeleton card
         skeleton = self._skeleton_cards.get(index)
         if skeleton:
             self.grid_layout.removeWidget(skeleton)
             skeleton.deleteLater()
+            del self._skeleton_cards[index]
+
+        # Get PIL data from worker
+        pil_data = self._load_worker.pil_results.get(index)
+        pixmap = QPixmap()
+        if pil_data:
+            rgba_bytes, w, h = pil_data
+            qimg = QImage(rgba_bytes, w, h, QImage.Format_RGBA8888)
+            pixmap = QPixmap.fromImage(qimg.copy())
 
         card = QFrame()
         card.setObjectName("wm_picker_item")
         card.setMinimumHeight(180)
-        card.setMaximumWidth(tw + 8)
+        card.setMaximumWidth(tw)
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(4, 15, 4, 15)
         card_layout.setSpacing(4)
@@ -959,12 +965,10 @@ class ImagePickerDialog(QDialog):
         thumb_btn = QPushButton()
         thumb_btn.setObjectName("wm_picker_img_btn")
         thumb_btn.setCursor(Qt.PointingHandCursor)
-        pixmap = self._parent._load_rotated_pixmap(path, target_width=tw)
         if not pixmap.isNull():
             scaled = pixmap.scaledToWidth(tw, Qt.SmoothTransformation)
             if scaled.height() > 200:
                 scaled = pixmap.scaled(tw, 200, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-                # Crop center: take tw×200 from the scaled image
                 crop_y = (scaled.height() - 200) // 2
                 scaled = scaled.copy(0, crop_y, tw, 200)
             thumb_btn.setIcon(QIcon(scaled))
@@ -977,9 +981,43 @@ class ImagePickerDialog(QDialog):
         card_layout.addWidget(thumb_btn, 1)
 
         self.grid_layout.addWidget(card, row, col)
-        self._load_index += 1
         self._update_count()
-        QTimer.singleShot(0, self._load_next_image)
+
+    def _clear_grid(self):
+        while self.grid_layout.count():
+            item = self.grid_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.checkboxes.clear()
+
+    def _create_skeleton_card(self, tw):
+        card = QFrame()
+        card.setObjectName("wm_picker_skeleton")
+        card.setMinimumHeight(180)
+        card.setMaximumWidth(tw)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(4, 15, 4, 15)
+        card_layout.setSpacing(4)
+        # Fake checkbox row
+        top_row = QWidget()
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        fake_cb = QLabel()
+        fake_cb.setObjectName("wm_skeleton_checkbox")
+        fake_cb.setFixedSize(18, 18)
+        top_layout.addWidget(fake_cb)
+        fake_text = QLabel()
+        fake_text.setObjectName("wm_skeleton_text")
+        fake_text.setMinimumWidth(60)
+        top_layout.addWidget(fake_text)
+        top_layout.addStretch()
+        card_layout.addWidget(top_row)
+        # Fake thumbnail area
+        shimmer = QLabel()
+        shimmer.setObjectName("wm_skeleton_shimmer")
+        shimmer.setFixedSize(tw, 200)
+        card_layout.addWidget(shimmer)
+        return card
 
     def _on_toggle_select(self, index):
         cb = self.checkboxes[index]
@@ -999,8 +1037,15 @@ class ImagePickerDialog(QDialog):
         self._update_count()
 
     def _update_count(self):
-        total = len(self.checkboxes)
+        total = len(self.image_files)
+        loaded = len(self.checkboxes)
         selected = sum(1 for cb in self.checkboxes if cb.isChecked())
+        self.loaded_label.setText(f"已加载 {loaded}/{total} 张")
+        if loaded >= total and total > 0:
+            self.loaded_label.setObjectName("loaded_label_done")
+        else:
+            self.loaded_label.setObjectName("loaded_label_loading")
+        self.loaded_label.setStyleSheet(self.loaded_label.styleSheet())
         self.count_label.setText(f"已选 {selected}/{total} 张")
 
     def _on_confirm(self):
@@ -1013,6 +1058,81 @@ class ImagePickerDialog(QDialog):
 
     def get_selected_paths(self):
         return getattr(self, 'selected_paths', [])
+
+
+class ImageLoadWorker(QObject):
+    """后台线程加载PIL缩略图，通过Signal通知主线程更新UI"""
+    image_ready = Signal(int, str)  # index, path
+
+    def __init__(self):
+        super().__init__()
+        self.pil_results = {}  # index -> (rgba_bytes, width, height) or None
+        self.size_results = {}  # index -> (orig_size, estimated_size)
+        self._paths = []
+        self._thumb_width = 120
+        self._is_lossless = True
+
+    def start(self, paths, thumb_width, is_lossless=True):
+        self._paths = paths
+        self._thumb_width = thumb_width
+        self._is_lossless = is_lossless
+        self.pil_results.clear()
+        self.size_results.clear()
+        t = threading.Thread(target=self._do_load, daemon=True)
+        t.start()
+
+    # 压缩比例粗略值：
+    # JPEG quality=85 → 约65%原大小 | JPEG quality=75+optimize+progressive → 约30%原大小
+    # PNG compress_level=9 → 约85%原大小 | PNG→JPEG quality=75 → 约15%原大小
+    # WebP lossless → 约70%原大小 | WebP quality=75 → 约30%原大小
+    def _estimate_ratio(self, ext, is_lossless):
+        if is_lossless:
+            if ext in ('.jpg', '.jpeg'):
+                return 0.42   # JPEG quality=85+optimize+progressive
+            elif ext == '.png':
+                return 0.85   # PNG compress_level=9
+            elif ext == '.webp':
+                return 0.70   # WebP lossless
+            else:
+                return 0.85
+        else:
+            if ext in ('.jpg', '.jpeg'):
+                return 0.30   # JPEG quality=75 + optimize + progressive
+            elif ext == '.png':
+                return 0.15   # PNG→JPEG quality=75
+            elif ext == '.webp':
+                return 0.30   # WebP quality=75
+            else:
+                return 0.50
+
+    def _do_load(self):
+        for i, path in enumerate(self._paths):
+            try:
+                pil_img = Image.open(path)
+                pil_img = ImageOps.exif_transpose(pil_img)
+
+                # Thumbnail for display
+                rgba_img = pil_img.convert("RGBA")
+                w = self._thumb_width
+                ratio = rgba_img.height / rgba_img.width if rgba_img.width > 0 else 1
+                h = int(w * ratio)
+                rgba_img = rgba_img.resize((w, h), Image.LANCZOS)
+                data = rgba_img.tobytes("raw", "RGBA")
+                self.pil_results[i] = (data, w, h)
+
+                # Rough compression size estimate
+                orig_size = os.path.getsize(path)
+                ext = os.path.splitext(path)[1].lower()
+                ratio_val = self._estimate_ratio(ext, self._is_lossless)
+                self.size_results[i] = (orig_size, int(orig_size * ratio_val))
+            except Exception:
+                self.pil_results[i] = None
+                try:
+                    orig_size = os.path.getsize(path)
+                except OSError:
+                    orig_size = 0
+                self.size_results[i] = (orig_size, int(orig_size * 0.42 if self._is_lossless else 0.50))
+            self.image_ready.emit(i, path)
 
 
 class LoadingOverlay(QWidget):
@@ -1046,12 +1166,12 @@ class LoadingOverlay(QWidget):
         self.raise_()
         self.timer.start(40)  # ~25fps
 
-    def show_success(self, msg="水印相册已生成！"):
+    def show_success(self, msg="水印相册已生成！", duration_ms=2000):
         self.timer.stop()
         self.success_visible = True
         self.success_msg = msg
         self.update()
-        self.success_timer.start(2000)
+        self.success_timer.start(duration_ms)
 
     def _tick(self):
         self.angle = (self.angle + 12) % 360
@@ -1099,7 +1219,7 @@ class LoadingOverlay(QWidget):
 class ExcelGeneratorApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("许愿瓶")
+        self.setWindowTitle("刘富波娇妻专用软件")
         screen = QApplication.primaryScreen()
         screen_height = screen.availableGeometry().height()
         min_height = int(screen_height * 2 / 3)
@@ -1114,12 +1234,12 @@ class ExcelGeneratorApp(QMainWindow):
         self.wm_image_paths = []
         self.wm_image_items = {}
         self._wm_skeleton_cards = {}
-        self._wm_load_index = 0
+        self._wm_load_worker = None
         self._wm_thumb_width = 120
         self.cp_image_paths = []
         self.cp_image_items = {}
         self._cp_skeleton_cards = {}
-        self._cp_load_index = 0
+        self._cp_load_worker = None
         self._cp_thumb_width = 120
         self.wm_cities = []
         self._load_cities()
@@ -1478,6 +1598,11 @@ class ExcelGeneratorApp(QMainWindow):
         title_label = QLabel("🖼️ 图片显示框")
         title_label.setObjectName("wm_image_title")
         title_layout.addWidget(title_label)
+        title_layout.addSpacing(8)
+
+        self.wm_loaded_label = QLabel("已加载 0/0 张")
+        self.wm_loaded_label.setObjectName("loaded_label_loading")
+        title_layout.addWidget(self.wm_loaded_label)
         title_layout.addStretch()
 
         self.wm_select_btn = QPushButton("选择文件")
@@ -1698,6 +1823,10 @@ class ExcelGeneratorApp(QMainWindow):
         title_label = QLabel("📦 图片显示框")
         title_label.setObjectName("cp_image_title")
         title_row.addWidget(title_label)
+        title_row.addSpacing(8)
+        self.cp_loaded_label = QLabel("已加载 0/0 张")
+        self.cp_loaded_label.setObjectName("loaded_label_loading")
+        title_row.addWidget(self.cp_loaded_label)
         title_row.addStretch()
         self.cp_select_btn = QPushButton("选择文件")
         self.cp_select_btn.setObjectName("cp_select_btn")
@@ -1950,9 +2079,46 @@ class ExcelGeneratorApp(QMainWindow):
         self._cp_refresh_grid()
 
     def _on_cp_delete_image(self, path):
-        if path in self.cp_image_paths:
-            self.cp_image_paths.remove(path)
-        self._cp_refresh_grid()
+        if path not in self.cp_image_paths:
+            return
+        self.cp_image_paths.remove(path)
+        # Remove the card widget from grid
+        item = self.cp_image_items.pop(path, None)
+        if item:
+            self.cp_image_grid_layout.removeWidget(item)
+            item.deleteLater()
+        # Rebuild grid positions without flash (move remaining cards forward)
+        for i, p in enumerate(self.cp_image_paths):
+            card = self.cp_image_items.get(p)
+            if card:
+                row, col = i // 4, i % 4
+                self.cp_image_grid_layout.addWidget(card, row, col)
+        # Update empty state visibility
+        has_images = len(self.cp_image_paths) > 0
+        self.cp_empty_state.setVisible(not has_images)
+        self.cp_image_scroll.setVisible(has_images)
+        self.cp_clear_btn.setVisible(has_images)
+        # Update scroll height
+        ROW_HEIGHT = 200
+        GRID_SPACING = 10
+        PEEK_HEIGHT = ROW_HEIGHT // 4
+        total_rows = (len(self.cp_image_paths) + 3) // 4
+        if total_rows <= 2:
+            scroll_h = total_rows * ROW_HEIGHT + (total_rows - 1) * GRID_SPACING if total_rows > 0 else 0
+        else:
+            scroll_h = 2 * ROW_HEIGHT + GRID_SPACING + PEEK_HEIGHT
+        self.cp_image_scroll.setMinimumHeight(scroll_h)
+        self.cp_image_scroll.setMaximumHeight(scroll_h)
+        # Update loaded label and stats
+        loaded = len(self.cp_image_items)
+        total = len(self.cp_image_paths)
+        self.cp_loaded_label.setText(f"已加载 {loaded}/{total} 张")
+        if loaded >= total and total > 0:
+            self.cp_loaded_label.setObjectName("loaded_label_done")
+        else:
+            self.cp_loaded_label.setObjectName("loaded_label_loading")
+        self.cp_loaded_label.setStyleSheet(self.cp_loaded_label.styleSheet())
+        self._cp_update_stats_from_cache()
 
     def _on_cp_preview_image(self, path):
         pixmap = self._load_rotated_pixmap(path, target_width=800)
@@ -1981,10 +2147,14 @@ class ExcelGeneratorApp(QMainWindow):
         for path, item in self.cp_image_items.items():
             item.deleteLater()
         self.cp_image_items.clear()
+        self.cp_loaded_label.setText(f"已加载 0/{len(self.cp_image_paths)} 张")
         for item in self._cp_skeleton_cards.values():
             item.deleteLater()
         self._cp_skeleton_cards.clear()
-        self._cp_load_index = 0
+        # Stop previous worker if running
+        if self._cp_load_worker:
+            self._cp_load_worker.image_ready.disconnect(self._cp_on_image_ready)
+            self._cp_load_worker = None
 
         # Toggle empty state vs grid
         has_images = len(self.cp_image_paths) > 0
@@ -1993,7 +2163,7 @@ class ExcelGeneratorApp(QMainWindow):
         self.cp_clear_btn.setVisible(has_images)
 
         if not has_images:
-            self._cp_update_stats()
+            self._cp_update_stats_from_cache()
             return
 
         # Calculate thumbnail width
@@ -2013,7 +2183,7 @@ class ExcelGeneratorApp(QMainWindow):
             self.cp_image_grid_layout.addWidget(skeleton, row, col)
 
         # Set initial scroll height
-        ROW_HEIGHT = 250
+        ROW_HEIGHT = 200
         GRID_SPACING = 10
         PEEK_HEIGHT = ROW_HEIGHT // 4
         total_rows = (len(self.cp_image_paths) + 3) // 4
@@ -2024,24 +2194,118 @@ class ExcelGeneratorApp(QMainWindow):
         self.cp_image_scroll.setMinimumHeight(scroll_h)
         self.cp_image_scroll.setMaximumHeight(scroll_h)
 
-        self._cp_update_stats()
-        # Start replacing skeletons with real images one by one
-        QTimer.singleShot(50, self._cp_load_next_image)
+        self._cp_update_stats_from_cache()
+
+        # Start background thread to load images
+        is_lossless = self.cp_method_group.button(0).isChecked()
+        self._cp_load_worker = ImageLoadWorker()
+        self._cp_load_worker.image_ready.connect(self._cp_on_image_ready)
+        self._cp_load_worker.start(self.cp_image_paths, thumb_width, is_lossless)
+
+    def _apply_card_mask(self, card, radius):
+        """Apply rounded clip mask to card so child widgets are clipped at corners"""
+        from PySide6.QtGui import QRegion, QBitmap
+        w = card.width()
+        h = card.height()
+        if w <= 0 or h <= 0:
+            return
+        path = QPainterPath()
+        path.addRoundedRect(0, 0, w, h, radius, radius)
+        region = QRegion(path.toFillPolygon().toPolygon())
+        card.setMask(region)
+
+    def _cp_on_image_ready(self, index, path):
+        """Main thread callback: replace skeleton with real card using pre-loaded data"""
+        row = index // 4
+        col = index % 4
+        tw = self._cp_thumb_width
+
+        # Remove skeleton card
+        skeleton = self._cp_skeleton_cards.get(index)
+        if skeleton:
+            self.cp_image_grid_layout.removeWidget(skeleton)
+            skeleton.deleteLater()
+            del self._cp_skeleton_cards[index]
+
+        # Get PIL data from worker
+        pil_data = self._cp_load_worker.pil_results.get(index)
+        pixmap = QPixmap()
+        if pil_data:
+            rgba_bytes, w, h = pil_data
+            qimg = QImage(rgba_bytes, w, h, QImage.Format_RGBA8888)
+            pixmap = QPixmap.fromImage(qimg.copy())
+
+        # Create real card
+        item = QFrame()
+        item.setObjectName("cp_image_item")
+        item.setMinimumHeight(200)
+        item.setMaximumWidth(tw)
+        item_layout = QVBoxLayout(item)
+        item_layout.setContentsMargins(0, 0, 0, 3)
+        item_layout.setSpacing(0)
+
+        # Thumbnail container — delete button overlays on image top-right
+        thumb_container = QWidget()
+        thumb_container_layout = QVBoxLayout(thumb_container)
+        thumb_container_layout.setContentsMargins(0, 0, 0, 0)
+        thumb_container_layout.setSpacing(0)
+
+        # Thumbnail (width fills card, height fixed — overflow clipped by card border-radius)
+        thumb_btn = QPushButton()
+        thumb_btn.setObjectName("cp_img_btn")
+        thumb_btn.setCursor(Qt.PointingHandCursor)
+        if not pixmap.isNull():
+            scaled = pixmap.scaledToWidth(tw, Qt.SmoothTransformation)
+            thumb_btn.setIcon(QIcon(scaled))
+            thumb_btn.setIconSize(scaled.size())
+            thumb_btn.setFixedWidth(tw)
+            thumb_btn.setMinimumHeight(1)
+            thumb_btn.setMaximumHeight(167)
+        else:
+            thumb_btn.setText("无法加载")
+            thumb_btn.setFixedSize(tw, 167)
+        thumb_btn.clicked.connect(lambda checked=False, p=path: self._on_cp_preview_image(p))
+        thumb_container_layout.addWidget(thumb_btn, 1)
+
+        # Delete button floating on top-right of thumbnail
+        del_btn = QPushButton("✕")
+        del_btn.setObjectName("cp_delete_btn")
+        del_btn.setCursor(Qt.PointingHandCursor)
+        del_btn.setParent(thumb_container)
+        del_btn.clicked.connect(lambda checked=False, p=path: self._on_cp_delete_image(p))
+        del_btn.move(tw - 20, 2)
+        del_btn.raise_()
+
+        item_layout.addWidget(thumb_container, 1)
+
+        # Filename label (5pt gap from image)
+        item_layout.addSpacing(5)
+        name_label = QLabel(os.path.basename(path))
+        name_label.setObjectName("cp_filename_label")
+        name_label.setAlignment(Qt.AlignCenter)
+        item_layout.addWidget(name_label)
+
+        self.cp_image_grid_layout.addWidget(item, row, col)
+        # Apply rounded clip mask so image corners follow card border-radius
+        QTimer.singleShot(0, lambda: self._apply_card_mask(item, 8))
+        self.cp_image_items[path] = item
+        self.cp_loaded_label.setText(f"已加载 {len(self.cp_image_items)}/{len(self.cp_image_paths)} 张")
+        if len(self.cp_image_items) >= len(self.cp_image_paths) and len(self.cp_image_paths) > 0:
+            self.cp_loaded_label.setObjectName("loaded_label_done")
+        else:
+            self.cp_loaded_label.setObjectName("loaded_label_loading")
+        self.cp_loaded_label.setStyleSheet(self.cp_loaded_label.styleSheet())
+        # Quick stats update from cached worker data (no PIL recompression)
+        self._cp_update_stats_from_cache()
 
     def _cp_create_skeleton_card(self, tw):
         card = QFrame()
         card.setObjectName("cp_skeleton")
-        card.setMinimumHeight(250)
-        card.setMaximumWidth(tw + 8)
+        card.setMinimumHeight(200)
+        card.setMaximumWidth(tw)
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(4, 4, 4, 4)
-        card_layout.setSpacing(2)
-        # Fake delete row
-        top_row = QWidget()
-        top_layout = QHBoxLayout(top_row)
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.addStretch()
-        card_layout.addWidget(top_row)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setSpacing(0)
         # Shimmer placeholder
         shimmer = QLabel()
         shimmer.setObjectName("cp_skeleton_shimmer")
@@ -2051,133 +2315,44 @@ class ExcelGeneratorApp(QMainWindow):
         card_layout.addWidget(QLabel())
         return card
 
-    def _cp_load_next_image(self):
-        if self._cp_load_index >= len(self.cp_image_paths):
-            return
-
-        path = self.cp_image_paths[self._cp_load_index]
-        index = self._cp_load_index
-        row = index // 4
-        col = index % 4
-        tw = self._cp_thumb_width
-
-        # Remove skeleton card at this position
-        skeleton = self._cp_skeleton_cards.get(index)
-        if skeleton:
-            self.cp_image_grid_layout.removeWidget(skeleton)
-            skeleton.deleteLater()
-            del self._cp_skeleton_cards[index]
-
-        # Create real card
-        item = QFrame()
-        item.setObjectName("cp_image_item")
-        item.setMinimumHeight(250)
-        item.setMaximumWidth(tw + 8)
-        item_layout = QVBoxLayout(item)
-        item_layout.setContentsMargins(4, 4, 4, 4)
-        item_layout.setSpacing(2)
-
-        # Top row: delete button at right
-        top_row = QWidget()
-        top_layout = QHBoxLayout(top_row)
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.addStretch()
-
-        del_btn = QPushButton("✕")
-        del_btn.setObjectName("cp_delete_btn")
-        del_btn.setCursor(Qt.PointingHandCursor)
-        del_btn.clicked.connect(lambda checked=False, p=path: self._on_cp_delete_image(p))
-        top_layout.addWidget(del_btn)
-        item_layout.addWidget(top_row)
-
-        # Thumbnail (clickable for preview)
-        pixmap = self._load_rotated_pixmap(path, target_width=tw)
-        thumb_btn = QPushButton()
-        thumb_btn.setObjectName("cp_img_btn")
-        thumb_btn.setCursor(Qt.PointingHandCursor)
-        if not pixmap.isNull():
-            scaled = pixmap.scaled(tw, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            thumb_btn.setIcon(QIcon(scaled))
-            thumb_btn.setIconSize(scaled.size())
-            thumb_btn.setFixedSize(scaled.size())
-        else:
-            thumb_btn.setText("无法加载")
-            thumb_btn.setFixedSize(tw, 200)
-        thumb_btn.clicked.connect(lambda checked=False, p=path: self._on_cp_preview_image(p))
-        item_layout.addWidget(thumb_btn, 1)
-
-        # Filename label
-        name_label = QLabel(os.path.basename(path))
-        name_label.setObjectName("cp_filename_label")
-        name_label.setAlignment(Qt.AlignCenter)
-        item_layout.addWidget(name_label)
-
-        self.cp_image_grid_layout.addWidget(item, row, col)
-        self.cp_image_items[path] = item
-
-        self._cp_load_index += 1
-        self._cp_update_stats()
-        QTimer.singleShot(0, self._cp_load_next_image)
-
-    def _cp_update_stats(self):
+    def _cp_update_stats_from_cache(self):
+        """从worker缓存数据快速更新统计，不做PIL压缩"""
         total_bytes = 0
-        count = len(self.cp_image_paths)
         estimated_bytes = 0
+        count = len(self.cp_image_paths)
         is_lossless = self.cp_method_group.button(0).isChecked()
 
-        for path in self.cp_image_paths:
-            try:
-                orig_size = os.path.getsize(path)
-                total_bytes += orig_size
-
-                # Estimate compressed size by doing a lightweight in-memory compress
-                img = Image.open(path)
-                img = ImageOps.exif_transpose(img)
-                ext = os.path.splitext(path)[1].lower()
-
-                from io import BytesIO
-                buf = BytesIO()
-
-                if is_lossless:
-                    if ext in ('.jpg', '.jpeg'):
-                        img.convert('RGB').save(buf, 'JPEG', quality=85, optimize=True, progressive=True)
-                    elif ext == '.png':
-                        img.save(buf, 'PNG', compress_level=9, optimize=True)
-                    elif ext == '.webp':
-                        img.save(buf, 'WEBP', lossless=True, method=6)
-                    else:
-                        img.convert('RGB').save(buf, 'PNG', compress_level=9, optimize=True)
+        if self._cp_load_worker:
+            for i in range(count):
+                entry = self._cp_load_worker.size_results.get(i)
+                if entry:
+                    total_bytes += entry[0]
+                    ext = os.path.splitext(self.cp_image_paths[i])[1].lower()
+                    ratio_val = self._estimate_cp_ratio(ext, is_lossless)
+                    estimated_bytes += int(entry[0] * ratio_val)
                 else:
-                    if ext in ('.jpg', '.jpeg'):
-                        img.convert('RGB').save(buf, 'JPEG', quality=75, optimize=True, progressive=True)
-                    elif ext == '.png':
-                        img.convert('RGB').save(buf, 'JPEG', quality=75, optimize=True, progressive=True)
-                    elif ext == '.webp':
-                        img.convert('RGB').save(buf, 'WEBP', quality=75, method=4)
-                    else:
-                        img.convert('RGB').save(buf, 'JPEG', quality=75, optimize=True, progressive=True)
-
-                estimated_bytes += buf.tell()
-                buf.close()
-            except Exception:
-                # Fallback: use rough percentage estimate
+                    try:
+                        orig = os.path.getsize(self.cp_image_paths[i])
+                        total_bytes += orig
+                        ext = os.path.splitext(self.cp_image_paths[i])[1].lower()
+                        ratio_val = self._estimate_cp_ratio(ext, is_lossless)
+                        estimated_bytes += int(orig * ratio_val)
+                    except OSError:
+                        pass
+        else:
+            for path in self.cp_image_paths:
                 try:
-                    orig_size = os.path.getsize(path)
-                    total_bytes += orig_size
-                    if is_lossless:
-                        estimated_bytes += orig_size * 0.70
-                    else:
-                        estimated_bytes += orig_size * 0.50
+                    orig = os.path.getsize(path)
+                    total_bytes += orig
+                    ext = os.path.splitext(path)[1].lower()
+                    ratio_val = self._estimate_cp_ratio(ext, is_lossless)
+                    estimated_bytes += int(orig * ratio_val)
                 except OSError:
                     pass
 
         total_mb = total_bytes / 1024 / 1024
         estimated_mb = estimated_bytes / 1024 / 1024
-
-        if is_lossless:
-            ratio = (1 - estimated_bytes / total_bytes) * 100 if total_bytes > 0 else 0
-        else:
-            ratio = (1 - estimated_bytes / total_bytes) * 100 if total_bytes > 0 else 0
+        ratio_pct = (1 - estimated_bytes / total_bytes) * 100 if total_bytes > 0 else 0
 
         if total_mb >= 1:
             self.cp_stat_value1.setText(f"{total_mb:.1f} MB")
@@ -2195,12 +2370,24 @@ class ExcelGeneratorApp(QMainWindow):
 
         self.cp_stat_sub1.setText(f"{count} 张图片 · 未压缩")
         if count > 0 and total_bytes > 0:
-            self.cp_stat_sub2.setText(f"预估压缩 {ratio:.0f}% 体积")
+            self.cp_stat_sub2.setText(f"预估压缩 {ratio_pct:.0f}% 体积")
         else:
             self.cp_stat_sub2.setText("压缩率约 —")
 
+    def _estimate_cp_ratio(self, ext, is_lossless):
+        if is_lossless:
+            if ext in ('.jpg', '.jpeg'): return 0.42
+            elif ext == '.png': return 0.85
+            elif ext == '.webp': return 0.70
+            else: return 0.85
+        else:
+            if ext in ('.jpg', '.jpeg'): return 0.30
+            elif ext == '.png': return 0.15
+            elif ext == '.webp': return 0.30
+            else: return 0.35
+
     def _cp_on_method_changed(self):
-        self._cp_update_stats()
+        self._cp_update_stats_from_cache()
 
     def _cp_show_loading(self):
         self.cp_loading_overlay.show_loading()
@@ -2209,8 +2396,8 @@ class ExcelGeneratorApp(QMainWindow):
     def _cp_hide_loading(self):
         self.cp_loading_overlay.hide()
 
-    def _cp_show_success(self, msg):
-        self.cp_loading_overlay.show_success(msg)
+    def _cp_show_success(self, msg, duration_ms=1500):
+        self.cp_loading_overlay.show_success(msg, duration_ms)
 
     def _on_cp_start(self):
         try:
@@ -2316,15 +2503,14 @@ class ExcelGeneratorApp(QMainWindow):
                     self._cp_log_message(traceback.format_exc(), is_error=True)
                 QApplication.processEvents()
 
-            self._cp_hide_loading()
-
             if fail_list:
+                self._cp_hide_loading()
                 self._cp_log_message(f"压缩完成！成功 {success_count} 张, 失败 {len(fail_list)} 张", is_error=True)
                 msg = f"压缩完成！成功 {success_count} 张\n失败 {len(fail_list)} 张:\n" + "\n".join(fail_list)
                 QMessageBox.warning(self, "压缩结果", msg)
             else:
                 self._cp_log_message(f"全部完成！共 {success_count} 张图片压缩成功")
-                self._cp_show_success(f"压缩完成！共 {success_count} 张图片")
+                self._cp_show_success("压缩任务已完成！")
 
             self.cp_image_paths.clear()
             self._cp_refresh_grid()
@@ -2402,10 +2588,15 @@ class ExcelGeneratorApp(QMainWindow):
         for path, item in self.wm_image_items.items():
             item.deleteLater()
         self.wm_image_items.clear()
+        self.wm_loaded_label.setText(f"已加载 0/{len(self.wm_image_paths)} 张")
+        self.wm_image_items.clear()
         for item in self._wm_skeleton_cards.values():
             item.deleteLater()
         self._wm_skeleton_cards.clear()
-        self._wm_load_index = 0
+        # Stop previous worker if running
+        if self._wm_load_worker:
+            self._wm_load_worker.image_ready.disconnect(self._wm_on_image_ready)
+            self._wm_load_worker = None
 
         # Toggle empty state vs grid
         has_images = len(self.wm_image_paths) > 0
@@ -2433,7 +2624,7 @@ class ExcelGeneratorApp(QMainWindow):
             self.wm_image_grid_layout.addWidget(skeleton, row, col)
 
         # Set initial scroll height
-        ROW_HEIGHT = 250
+        ROW_HEIGHT = 200
         GRID_SPACING = 10
         PEEK_HEIGHT = ROW_HEIGHT // 4
         total_rows = (len(self.wm_image_paths) + 3) // 4
@@ -2444,23 +2635,101 @@ class ExcelGeneratorApp(QMainWindow):
         self.wm_image_scroll.setMinimumHeight(scroll_h)
         self.wm_image_scroll.setMaximumHeight(scroll_h)
 
-        # Start replacing skeletons with real images one by one
-        QTimer.singleShot(50, self._wm_load_next_image)
+        # Start background thread to load images
+        self._wm_load_worker = ImageLoadWorker()
+        self._wm_load_worker.image_ready.connect(self._wm_on_image_ready)
+        self._wm_load_worker.start(self.wm_image_paths, thumb_width)
+
+    def _wm_on_image_ready(self, index, path):
+        """Main thread callback: replace skeleton with real card using pre-loaded data"""
+        row = index // 4
+        col = index % 4
+        tw = self._wm_thumb_width
+
+        # Remove skeleton card
+        skeleton = self._wm_skeleton_cards.get(index)
+        if skeleton:
+            self.wm_image_grid_layout.removeWidget(skeleton)
+            skeleton.deleteLater()
+            del self._wm_skeleton_cards[index]
+
+        # Get PIL data from worker
+        pil_data = self._wm_load_worker.pil_results.get(index)
+        pixmap = QPixmap()
+        if pil_data:
+            rgba_bytes, w, h = pil_data
+            qimg = QImage(rgba_bytes, w, h, QImage.Format_RGBA8888)
+            pixmap = QPixmap.fromImage(qimg.copy())
+
+        # Create real card
+        item = QFrame()
+        item.setObjectName("wm_image_item")
+        item.setMinimumHeight(200)
+        item.setMaximumWidth(tw)
+        item_layout = QVBoxLayout(item)
+        item_layout.setContentsMargins(0, 0, 0, 3)
+        item_layout.setSpacing(0)
+
+        # Thumbnail container — delete button overlays on image top-right
+        thumb_container = QWidget()
+        thumb_container_layout = QVBoxLayout(thumb_container)
+        thumb_container_layout.setContentsMargins(0, 0, 0, 0)
+        thumb_container_layout.setSpacing(0)
+
+        # Thumbnail (width fills card, height fixed — overflow clipped by card border-radius)
+        thumb_btn = QPushButton()
+        thumb_btn.setObjectName("wm_img_btn")
+        thumb_btn.setCursor(Qt.PointingHandCursor)
+        if not pixmap.isNull():
+            scaled = pixmap.scaledToWidth(tw, Qt.SmoothTransformation)
+            thumb_btn.setIcon(QIcon(scaled))
+            thumb_btn.setIconSize(scaled.size())
+            thumb_btn.setFixedWidth(tw)
+            thumb_btn.setMinimumHeight(1)
+            thumb_btn.setMaximumHeight(167)
+        else:
+            thumb_btn.setText("无法加载")
+            thumb_btn.setFixedSize(tw, 167)
+        thumb_btn.clicked.connect(lambda checked=False, p=path: self._on_wm_preview_image(p))
+        thumb_container_layout.addWidget(thumb_btn, 1)
+
+        # Delete button floating on top-right of thumbnail
+        del_btn = QPushButton("✕")
+        del_btn.setObjectName("wm_delete_btn")
+        del_btn.setCursor(Qt.PointingHandCursor)
+        del_btn.setParent(thumb_container)
+        del_btn.clicked.connect(lambda checked=False, p=path: self._on_wm_delete_image(p))
+        del_btn.move(tw - 20, 2)
+        del_btn.raise_()
+
+        item_layout.addWidget(thumb_container, 1)
+
+        # Filename label (5pt gap from image)
+        item_layout.addSpacing(5)
+        name_label = QLabel(os.path.basename(path))
+        name_label.setObjectName("wm_filename_label")
+        name_label.setAlignment(Qt.AlignCenter)
+        item_layout.addWidget(name_label)
+
+        self.wm_image_grid_layout.addWidget(item, row, col)
+        # Apply rounded clip mask so image corners follow card border-radius
+        QTimer.singleShot(0, lambda: self._apply_card_mask(item, 8))
+        self.wm_image_items[path] = item
+        self.wm_loaded_label.setText(f"已加载 {len(self.wm_image_items)}/{len(self.wm_image_paths)} 张")
+        if len(self.wm_image_items) >= len(self.wm_image_paths) and len(self.wm_image_paths) > 0:
+            self.wm_loaded_label.setObjectName("loaded_label_done")
+        else:
+            self.wm_loaded_label.setObjectName("loaded_label_loading")
+        self.wm_loaded_label.setStyleSheet(self.wm_loaded_label.styleSheet())
 
     def _wm_create_skeleton_card(self, tw):
         card = QFrame()
         card.setObjectName("wm_skeleton")
-        card.setMinimumHeight(250)
-        card.setMaximumWidth(tw + 8)
+        card.setMinimumHeight(200)
+        card.setMaximumWidth(tw)
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(4, 4, 4, 4)
-        card_layout.setSpacing(2)
-        # Fake delete row
-        top_row = QWidget()
-        top_layout = QHBoxLayout(top_row)
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.addStretch()
-        card_layout.addWidget(top_row)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setSpacing(0)
         # Shimmer placeholder
         shimmer = QLabel()
         shimmer.setObjectName("wm_skeleton_shimmer")
@@ -2470,77 +2739,46 @@ class ExcelGeneratorApp(QMainWindow):
         card_layout.addWidget(QLabel())
         return card
 
-    def _wm_load_next_image(self):
-        if self._wm_load_index >= len(self.wm_image_paths):
-            return
-
-        path = self.wm_image_paths[self._wm_load_index]
-        index = self._wm_load_index
-        row = index // 4
-        col = index % 4
-        tw = self._wm_thumb_width
-
-        # Remove skeleton card at this position
-        skeleton = self._wm_skeleton_cards.get(index)
-        if skeleton:
-            self.wm_image_grid_layout.removeWidget(skeleton)
-            skeleton.deleteLater()
-            del self._wm_skeleton_cards[index]
-
-        # Create real card
-        item = QFrame()
-        item.setObjectName("wm_image_item")
-        item.setMinimumHeight(250)
-        item.setMaximumWidth(tw + 8)
-        item_layout = QVBoxLayout(item)
-        item_layout.setContentsMargins(4, 4, 4, 4)
-        item_layout.setSpacing(2)
-
-        # Top row: delete button at right
-        top_row = QWidget()
-        top_layout = QHBoxLayout(top_row)
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.addStretch()
-
-        del_btn = QPushButton("✕")
-        del_btn.setObjectName("wm_delete_btn")
-        del_btn.setCursor(Qt.PointingHandCursor)
-        del_btn.clicked.connect(lambda checked=False, p=path: self._on_wm_delete_image(p))
-        top_layout.addWidget(del_btn)
-        item_layout.addWidget(top_row)
-
-        # Thumbnail (clickable for preview)
-        pixmap = self._load_rotated_pixmap(path, target_width=tw)
-        thumb_btn = QPushButton()
-        thumb_btn.setObjectName("wm_img_btn")
-        thumb_btn.setCursor(Qt.PointingHandCursor)
-        if not pixmap.isNull():
-            scaled = pixmap.scaled(tw, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            thumb_btn.setIcon(QIcon(scaled))
-            thumb_btn.setIconSize(scaled.size())
-            thumb_btn.setFixedSize(scaled.size())
-        else:
-            thumb_btn.setText("无法加载")
-            thumb_btn.setFixedSize(tw, 200)
-        thumb_btn.clicked.connect(lambda checked=False, p=path: self._on_wm_preview_image(p))
-        item_layout.addWidget(thumb_btn, 1)
-
-        # Filename label
-        name_label = QLabel(os.path.basename(path))
-        name_label.setObjectName("wm_filename_label")
-        name_label.setAlignment(Qt.AlignCenter)
-        item_layout.addWidget(name_label)
-
-        self.wm_image_grid_layout.addWidget(item, row, col)
-        self.wm_image_items[path] = item
-
-        self._wm_load_index += 1
-        QTimer.singleShot(0, self._wm_load_next_image)
-
     def _on_wm_delete_image(self, path):
-        if path in self.wm_image_paths:
-            self.wm_image_paths.remove(path)
-            self._wm_refresh_grid()
+        if path not in self.wm_image_paths:
+            return
+        self.wm_image_paths.remove(path)
+        # Remove the card widget from grid
+        item = self.wm_image_items.pop(path, None)
+        if item:
+            self.wm_image_grid_layout.removeWidget(item)
+            item.deleteLater()
+        # Rebuild grid positions without flash (move remaining cards forward)
+        for i, p in enumerate(self.wm_image_paths):
+            card = self.wm_image_items.get(p)
+            if card:
+                row, col = i // 4, i % 4
+                self.wm_image_grid_layout.addWidget(card, row, col)
+        # Update empty state visibility
+        has_images = len(self.wm_image_paths) > 0
+        self.wm_empty_state.setVisible(not has_images)
+        self.wm_image_scroll.setVisible(has_images)
+        self.wm_clear_btn.setVisible(has_images)
+        # Update scroll height
+        ROW_HEIGHT = 200
+        GRID_SPACING = 10
+        PEEK_HEIGHT = ROW_HEIGHT // 4
+        total_rows = (len(self.wm_image_paths) + 3) // 4
+        if total_rows <= 2:
+            scroll_h = total_rows * ROW_HEIGHT + (total_rows - 1) * GRID_SPACING if total_rows > 0 else 0
+        else:
+            scroll_h = 2 * ROW_HEIGHT + GRID_SPACING + PEEK_HEIGHT
+        self.wm_image_scroll.setMinimumHeight(scroll_h)
+        self.wm_image_scroll.setMaximumHeight(scroll_h)
+        # Update loaded label
+        loaded = len(self.wm_image_items)
+        total = len(self.wm_image_paths)
+        self.wm_loaded_label.setText(f"已加载 {loaded}/{total} 张")
+        if loaded >= total and total > 0:
+            self.wm_loaded_label.setObjectName("loaded_label_done")
+        else:
+            self.wm_loaded_label.setObjectName("loaded_label_loading")
+        self.wm_loaded_label.setStyleSheet(self.wm_loaded_label.styleSheet())
 
     def _on_wm_preview_image(self, path):
         pixmap = self._load_rotated_pixmap(path, target_width=800)
@@ -2650,7 +2888,7 @@ class ExcelGeneratorApp(QMainWindow):
             max_day = calendar.monthrange(year_int, month_int)[1]
 
         # Output folder
-        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+        desktop = QStandardPaths.writableLocation(QStandardPaths.DesktopLocation)
         output_dir = os.path.join(desktop, "水印相册")
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
@@ -2660,6 +2898,10 @@ class ExcelGeneratorApp(QMainWindow):
             '/System/Library/Fonts/PingFang.ttc',
             '/System/Library/Fonts/STHeiti Light.ttc',
             '/Library/Fonts/Arial Unicode.ttf',
+            'C:/Windows/Fonts/msyh.ttc',
+            'C:/Windows/Fonts/msyhbd.ttc',
+            'C:/Windows/Fonts/simhei.ttf',
+            'C:/Windows/Fonts/simsun.ttc',
         ]
         font_path = None
         for fp in font_candidates:
@@ -2837,7 +3079,7 @@ class ExcelGeneratorApp(QMainWindow):
         # Done
         msg = f"水印相册已生成，共 {success_count}/{len(images)} 张\n路径: {output_dir}"
         self._wm_log_message(msg)
-        self.loading_overlay.show_success("水印相册已生成！")
+        self.loading_overlay.show_success("水印任务已完成！", 1500)
 
     def _get_city_json_path(self):
         if getattr(sys, 'frozen', False):

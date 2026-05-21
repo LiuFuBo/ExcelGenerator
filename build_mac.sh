@@ -6,7 +6,7 @@ echo "=== Excel订单生成器 Mac构建 (PySide6) ==="
 
 # 安装依赖
 echo "1. 安装Python依赖..."
-python3.11 -m pip install PySide6 openpyxl pypinyin pyinstaller
+python3.11 -m pip install PySide6 openpyxl pypinyin Pillow pyinstaller
 
 # 清理旧构建
 echo "2. 清理旧构建文件..."
@@ -20,6 +20,12 @@ python3.11 -m PyInstaller --windowed \
     --hidden-import=pypinyin \
     --hidden-import=openpyxl \
     --hidden-import=openpyxl.cell._writer \
+    --hidden-import=PIL \
+    --hidden-import=PIL.Image \
+    --hidden-import=PIL.ImageOps \
+    --hidden-import=PIL.ImageDraw \
+    --hidden-import=PIL.ImageFont \
+    --hidden-import=PIL.ImageFilter \
     --add-data="jj_header_rounded.png:." \
     --add-data="city_address.json:." \
     --add-data="icon_map.png:." \
