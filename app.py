@@ -2878,6 +2878,14 @@ class ExcelGeneratorApp(QMainWindow):
                     if i < len(q):
                         address_pool.append(q[i])
 
+        # Check if address pool is sufficient
+        image_count = len(self.wm_image_paths)
+        if image_count > len(address_pool):
+            QMessageBox.warning(self, "提示",
+                f"当前勾选城市共 {len(address_pool)} 个门店，但图片有 {image_count} 张。\n"
+                f"门店数量不足以覆盖所有图片，你可增加城市来解决。")
+            return
+
         # Date generation rules
         now = datetime.now()
         if month_int < now.month:
