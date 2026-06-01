@@ -1219,7 +1219,7 @@ class LoadingOverlay(QWidget):
 class ExcelGeneratorApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("刘富波娇妻专用软件")
+        self.setWindowTitle("漂流瓶")
         screen = QApplication.primaryScreen()
         screen_height = screen.availableGeometry().height()
         min_height = int(screen_height * 2 / 3)
